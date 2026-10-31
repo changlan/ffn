@@ -1,13 +1,24 @@
+from __future__ import annotations
+
+import pickle
 import re
+from collections.abc import Sequence
+from copy import deepcopy
 
 import decorator
-import numpy as np
 import pandas as pd
+from packaging.version import Version
 
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+
+def _copy_memoized_result(result):
+    if isinstance(result, (pd.Series, pd.DataFrame)):
+        result = result.copy(deep=True)
+        # pandas can still share axis data and nested attrs after a deep copy.
+        result.index = result.index.copy(deep=True)
+        if isinstance(result, pd.DataFrame):
+            result.columns = result.columns.copy(deep=True)
+        result.attrs = deepcopy(result.attrs)
+    return result
 
 
 def _memoize(func, *args, **kw):
@@ -16,36 +27,52 @@ def _memoize(func, *args, **kw):
     refresh_kw = func.mrefresh_keyword
 
     # kw is not always set - check args
-    if refresh_kw in func.__code__.co_varnames:
-        if args[func.__code__.co_varnames.index(refresh_kw)]:
+    positional_vars = func.__code__.co_varnames[: func.__code__.co_argcount]
+    if refresh_kw in positional_vars:
+        refresh_idx = positional_vars.index(refresh_kw)
+        if refresh_idx < len(args) and args[refresh_idx]:
             refresh = True
 
     # check in kw if not already set above
-    if not refresh and refresh_kw in kw:
-        if kw[refresh_kw]:
-            refresh = True
+    if not refresh and refresh_kw in kw and kw[refresh_kw]:
+        refresh = True
 
-    key = pickle.dumps(args, 1) + pickle.dumps(kw, 1)
+    try:
+        key = pickle.dumps(args, 1) + pickle.dumps(kw, 1)
+    except (pickle.PicklingError, AttributeError, TypeError):
+        # Lambdas, local functions, and some callable state cannot form reusable
+        # pickle keys. Execute without caching rather than inventing a key that
+        # could alias a different provider or its captured state.
+        return func(*args, **kw)
 
     cache = func.mcache
     if not refresh and key in cache:
-        return cache[key]
-    else:
-        cache[key] = result = func(*args, **kw)
-        return result
+        return _copy_memoized_result(cache[key])
+
+    result = func(*args, **kw)
+    # Keep the cached pandas snapshot private from the caller receiving this result.
+    cache[key] = _copy_memoized_result(result)
+    return result
 
 
 def memoize(f, refresh_keyword="mrefresh"):
     """
     Memoize decorator. The refresh keyword is the keyword
     used to bypass the cache (in the function call).
+    If pickle rejects arguments with PicklingError, AttributeError, or TypeError,
+    the call runs without caching. Other serialization errors propagate.
+    Exceptions raised by the wrapped function are propagated unchanged.
+    Pandas Series and DataFrame results are copied at the cache boundary
+    so assignments through returned containers do not change cached data.
+    Axes and attrs are copied independently. As with pandas deep copies,
+    mutable Python objects stored in cells are not recursively copied.
     """
     f.mcache = {}
     f.mrefresh_keyword = refresh_keyword
     return decorator.decorator(_memoize, f)
 
 
-def parse_arg(arg):
+def parse_arg(arg: str | list[str] | tuple[str]):
     """
     Parses arguments for convenience. Argument can be a
     csv list ('a,b,c'), a string, a list, a tuple.
@@ -53,7 +80,7 @@ def parse_arg(arg):
     Returns a list.
     """
     # handle string input
-    if type(arg) == str:
+    if isinstance(arg, str):
         arg = arg.strip()
         # parse csv as tickers and create children
         if "," in arg:
@@ -66,7 +93,7 @@ def parse_arg(arg):
     return arg
 
 
-def clean_ticker(ticker):
+def clean_ticker(ticker: str) -> str:
     """
     Cleans a ticker for easier use throughout MoneyTree
 
@@ -83,76 +110,108 @@ def clean_ticker(ticker):
     return res.lower()
 
 
-def clean_tickers(tickers):
+def clean_tickers(tickers: Sequence[str]) -> list[str]:
     """
     Maps clean_ticker over tickers.
     """
     return [clean_ticker(x) for x in tickers]
 
 
-def fmtp(number):
+def fmtp(number: float) -> str:
     """
     Formatting helper - percent
     """
-    if np.isnan(number):
+    if pd.isna(number):
         return "-"
     return format(number, ".2%")
 
 
-def fmtpn(number):
+def fmtpn(number: float) -> str:
     """
     Formatting helper - percent no % sign
     """
-    if np.isnan(number):
+    if pd.isna(number):
         return "-"
     return format(number * 100, ".2f")
 
 
-def fmtn(number):
+def fmtn(number: float) -> str:
     """
     Formatting helper - float
     """
-    if np.isnan(number):
+    if pd.isna(number):
         return "-"
     return format(number, ".2f")
 
 
-def get_freq_name(period):
-    period = period.upper()
+def get_freq_name(period: str) -> str | None:
+    match = re.fullmatch(r"(?:-?\d+)?([A-Za-z]+)(?:-([A-Za-z]+))?", period)
+    if match is None:
+        return None
+
+    base, anchor = match.groups()
+    if anchor is not None:
+        base_upper = base.upper()
+        month_anchored = {"Q", "QE", "BQ", "BQE", "QS", "BQS", "Y", "YE", "A", "BA", "BY", "BYE", "AS", "YS", "BAS", "BYS"}
+        valid_anchors = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN") if base_upper == "W" else ()
+        if base_upper in month_anchored:
+            valid_anchors = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+        if anchor.upper() not in valid_anchors:
+            return None
+
+    # These aliases are case sensitive in pandas: "ms" is milliseconds while
+    # "MS" is month start, so they have to be matched before upper casing
+    case_sensitive = {
+        "min": "minutely",
+        "ms": "milliseconds",
+        "us": "microseconds",
+        "ns": "nanoseconds",
+    }
+    if base in case_sensitive:
+        return case_sensitive[base]
+
     periods = {
         "B": "business day",
         "C": "custom business day",
         "D": "daily",
         "W": "weekly",
         "M": "monthly",
+        "ME": "monthly",
         "BM": "business month end",
+        "BME": "business month end",
         "CBM": "custom business month end",
+        "CBME": "custom business month end",
         "MS": "month start",
         "BMS": "business month start",
         "CBMS": "custom business month start",
         "Q": "quarterly",
+        "QE": "quarterly",
         "BQ": "business quarter end",
+        "BQE": "business quarter end",
         "QS": "quarter start",
         "BQS": "business quarter start",
         "Y": "yearly",
+        "YE": "yearly",
         "A": "yearly",
         "BA": "business year end",
+        "BY": "business year end",
+        "BYE": "business year end",
         "AS": "year start",
+        "YS": "year start",
         "BAS": "business year start",
+        "BYS": "business year start",
         "H": "hourly",
         "T": "minutely",
         "S": "secondly",
-        "L": "milliseonds",
+        "L": "milliseconds",
         "U": "microseconds",
+        "N": "nanoseconds",
     }
 
-    if period in periods:
-        return periods[period]
-    else:
-        return None
+    return periods.get(base.upper())
 
 
-def scale(val, src, dst):
+def scale(val: float, src: Sequence[float], dst: Sequence[float]) -> float:
     """
     Scale value from src range to dst range.
     If value outside bounds, it is clipped and set to
@@ -172,14 +231,21 @@ def scale(val, src, dst):
 
 
 def as_percent(self, digits=2):
-    return as_format(self, ".%s%%" % digits)
+    return as_format(self, f".{digits}%")
 
 
-def as_format(item, format_str=".2f"):
+def as_format(item: pd.DataFrame | pd.Series, format_str=".2f") -> pd.DataFrame | pd.Series:
     """
     Map a format string over a pandas object.
     """
+    PANDAS_VERSION = Version(pd.__version__)
+    PANDAS_210 = PANDAS_VERSION >= Version("2.1.0")
+
+    select_map = "map"
+    if not PANDAS_210:
+        select_map = "applymap"
+
     if isinstance(item, pd.Series):
         return item.map(lambda x: format(x, format_str))
     elif isinstance(item, pd.DataFrame):
-        return item.applymap(lambda x: format(x, format_str))
+        return getattr(item, select_map)(lambda x: format(x, format_str))

@@ -1,47 +1,99 @@
-TMPREPO=/tmp/docs/ffn
+.DEFAULT_GOAL := help
+.PHONY: develop requirements build install lint-py lint-docs fix-py fix-docs lint lints fix format check-dist check-types checks check test tests coverage benchmark show-version patch minor major dist dist-build dist-check publish upload docs serve notebooks clean help
 
-.PHONY: clean dist docs pages serve notebooks klink test lint fix
+develop:  ## install development dependencies and library
+	uv pip install -e '.[develop]'
 
-test:
-	python -m nose --with-coverage --cover-package ffn
+requirements:  ## install prerequisite Python build requirements
+	uv pip install -r pyproject.toml --extra develop
 
-lint:
-	python -m flake8 ffn setup.py
+build:  ## build the Python library
+	python -m build -n
 
-fix:
-	python -m black ffn setup.py
+install:  ## install library
+	uv pip install .
 
-clean:
-	- rm -rf dist
-	- rm -rf ffn.egg-info
+lint-py:  ## lint Python with ruff
+	python -m ruff check ffn
+	python -m ruff format --check ffn
 
-dist:
-	python setup.py sdist
+lint-docs:  ## lint contributor documentation
+	python -m mdformat --check README.md docs/development.md docs/source/*.md
+	python -m codespell_lib README.md docs/development.md docs/source/*.md
 
-upload: clean dist
-	twine upload dist/*
+fix-py:  ## autoformat Python code
+	python -m ruff check --fix ffn
+	python -m ruff format ffn
 
-docs: 
-	$(MAKE) -C docs/ clean
-	$(MAKE) -C docs/ html
+fix-docs:  ## autoformat contributor documentation
+	python -m mdformat README.md docs/development.md docs/source/*.md
+	python -m codespell_lib --write README.md docs/development.md docs/source/*.md
 
-pages: 
-	- rm -rf $(TMPREPO)
-	git clone -b gh-pages https://github.com/pmorissette/ffn.git $(TMPREPO)
-	rm -rf $(TMPREPO)/*
-	cp -r docs/build/html/* $(TMPREPO)
-	cd $(TMPREPO); \
-	git add -A ; \
-	git commit -a -m 'auto-updating docs' ; \
-	git push
+lint: lint-py lint-docs  ## run all linters
+lints: lint
+fix: fix-py fix-docs  ## run all autoformatters
+format: fix
 
-serve: 
-	cd docs/build/html; \
-	python -m SimpleHTTPServer 9087
+check-dist:  ## check sdist and wheel contents
+	check-dist -v --rebuild
 
-notebooks:
-	cd docs/source; \
-	ipython notebook --no-browser --ip=*
+check-types:  ## check Python types (advisory)
+	ty check ffn
 
-klink:
-	git subtree pull --prefix=docs/source/_themes/klink --squash klink master
+checks: check-dist  ## run distribution checks
+check: checks
+
+test:  ## run Python tests
+	python -m pytest tests
+
+tests: test
+
+coverage:  ## run tests with coverage
+	python -m pytest tests --cov=ffn --cov-report term-missing --cov-report xml
+
+benchmark:  ## run performance benchmarks
+	python -m pytest benchmarks --benchmark-only
+
+show-version:  ## show current library version
+	@bump-my-version show current_version
+
+patch:  ## bump a patch version
+	@bump-my-version bump patch
+
+minor:  ## bump a minor version
+	@bump-my-version bump minor
+
+major:  ## bump a major version
+	@bump-my-version bump major
+
+dist-build:  ## build Python distributions
+	python -m build -w -s
+
+dist-check:  ## check distribution metadata
+	python -m twine check dist/*
+
+dist:  ## build and check distributions
+	$(MAKE) clean
+	$(MAKE) dist-build
+	$(MAKE) dist-check
+
+publish: dist
+
+upload: dist  ## upload distributions to PyPI
+	python -m twine upload dist/* --skip-existing
+
+docs:  ## build documentation with Yardang and Klink
+	yardang build --warning-is-error
+	cp -R docs/source/_static/. docs/html/_static/
+
+serve:  ## serve built documentation on port 9087
+	python -m http.server 9087 --directory docs/html
+
+notebooks:  ## edit documentation notebooks (requires Jupyter)
+	cd docs/source && jupyter notebook --no-browser
+
+clean:  ## remove distribution build output
+	rm -rf build dist ffn.egg-info
+
+help:
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "%-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# IDE-specific settings
+.idea/
+
 # C extensions & files
 *.so
 *.c
@@ -9,6 +12,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 env/
+.venv/
 bin/
 build/
 develop-eggs/
@@ -30,10 +34,14 @@ pip-delete-this-directory.txt
 # Unit test / coverage reports
 htmlcov/
 .tox/
+.benchmarks/
 .coverage
 .cache
 nosetests.xml
 coverage.xml
+python_junit.xml
+junit.xml
+.pytest_cache/
 
 # Translations
 *.mo
@@ -52,6 +60,8 @@ coverage.xml
 
 # Sphinx documentation
 docs/_build/
+docs/html/
+/index.md
 
 # vim .swp
 *.swp
@@ -59,5 +69,6 @@ docs/_build/
 #ipython notebook files
 .ipynb_checkpoints/
 
-# css files
-docs/source/_themes/klink/static/css
+reference
+/base
+/bt
